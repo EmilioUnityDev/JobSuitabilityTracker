@@ -1,0 +1,3 @@
+title: "Job Suitability Tracker"
+description: "Muestra el progreso individual de cada duplicante para el logro Job Suitability. Debajo de los contadores existentes aparece una lista con un ✓ o ✗ por cada duplicante, indicando cuántos ciclos consecutivos lleva trabajando con traje."
+staticID: "JobSuitabilityTracker"

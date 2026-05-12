@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- ONI usa .NET Framework 4.8 (o net472 en versiones antiguas).
+         Si la compilación falla por TargetFramework, prueba net472. -->
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>JobSuitabilityTracker</AssemblyName>
+    <RootNamespace>JobSuitabilityTracker</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!-- El mod NO debe copiar las DLLs del juego en la carpeta de salida -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Coloca la DLL compilada directamente en la carpeta del mod -->
+    <OutputPath>../</OutputPath>
+  </PropertyGroup>
+
+  <!-- ================================================================
+       REFERENCIAS A LAS DLLs DEL JUEGO
+       Cambia la variable ONI_PATH a la carpeta de instalación de tu juego.
+       Ruta típica en Steam (Windows):
+         C:\Program Files (x86)\Steam\steamapps\common\OxygenNotIncluded
+       ================================================================ -->
+  <PropertyGroup>
+    <!-- Edita esto con tu ruta de instalación de ONI -->
+    <ONI_PATH>C:\Program Files (x86)\Steam\steamapps\common\OxygenNotIncluded</ONI_PATH>
+    <ONI_MANAGED>$(ONI_PATH)\OxygenNotIncluded_Data\Managed</ONI_MANAGED>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Código del juego: clases de alto nivel (ColonyAchievementTracker, MinionIdentity, GameClock...) -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ONI_MANAGED)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Clases base de ONI: KMonoBehaviour, KPrefabID, ResourceSet<>, ColonyAchievement,
+         ColonyAchievementRequirement, etc. IMPRESCINDIBLE para compilar. -->
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(ONI_MANAGED)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Biblioteca de parcheo Harmony (incluida con ONI) -->
+    <Reference Include="0Harmony">
+      <HintPath>$(ONI_MANAGED)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Unity Engine -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(ONI_MANAGED)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ONI_MANAGED)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ONI_MANAGED)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Necesario para TextAnchor (usado en VerticalLayoutGroup) -->
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ONI_MANAGED)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- TextMeshPro (usado por LocText en ONI) -->
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ONI_MANAGED)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
