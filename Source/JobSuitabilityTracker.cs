@@ -1,21 +1,18 @@
 // ============================================================
 //  Job Suitability Tracker — Mod para Oxygen Not Included
 //  Compatible con juego base (VANILLA_ID) y Space Out (EXPANSION1_ID)
-//  Versión 1.36
+//  Versión 1.49
 //
 //  QUÉ HACE:
 //    Añade debajo de los contadores del logro "Idoneidad Laboral"
 //    (ExosuitCycles) una lista de todos los duplicantes con ☑ o ☐
 //    indicando si completaron alguna tarea con traje en el ciclo actual.
 //
-//  CÓMO RASTREA (doble fuente):
-//    1) SuitChoreTracker (tiempo real): parcheamos ChoreDriver.SetChore y
-//       ChoreDriver.StopChore. Cuando un chore pasa a inactivo con
-//       context.chore.isComplete==true y el dupe lleva HasAirtightSuit,
-//       lo registramos. Se limpia automáticamente al detectar nuevo ciclo.
-//    2) HasAirtightSuit (fallback): dupes que llevan traje ahora mismo casi
-//       siempre han completado al menos una tarea este ciclo.
-//    ☑ = rastreado por tracker O lleva traje actualmente.
+//  CÓMO RASTREA:
+//    Lee directamente el campo dupesCompleteChoresInSuits de
+//    ColonyAchievementTracker — la misma fuente que usa el juego para
+//    su contador oficial. Esto garantiza paridad exacta sin necesidad
+//    de interceptar chores, workers ni eventos de finalización.
 //
 //  PANEL:
 //    AchievementWidget.ShowProgress(ColonyAchievementStatus achievement)
@@ -41,43 +38,6 @@ namespace JobSuitabilityTracker
     }
 
     // ================================================================
-    //  TRACKER DE TAREAS CON TRAJE
-    //  Registra qué dupes completaron una tarea con traje en el ciclo
-    //  actual. Se limpia automáticamente al detectar un nuevo ciclo.
-    // ================================================================
-    public static class SuitChoreTracker
-    {
-        private static int          _trackedCycle = -1;
-        private static HashSet<int> _done         = new HashSet<int>();
-
-        public static void Record(int instanceId)
-        {
-            int c = CurrentCycle();
-            if (_trackedCycle != c) { _done.Clear(); _trackedCycle = c; }
-            _done.Add(instanceId);
-        }
-
-        public static bool HasDone(int instanceId)
-        {
-            if (_trackedCycle != CurrentCycle()) return false;
-            return _done.Contains(instanceId);
-        }
-
-        public static int CountThisCycle()
-        {
-            if (_trackedCycle != CurrentCycle()) return 0;
-            return _done.Count;
-        }
-
-        private static int CurrentCycle()
-        {
-            if (GameClock.Instance == null) return 0;
-            try { return (int)ReflectionHelper.Invoke(GameClock.Instance, "GetCycle"); }
-            catch { return 0; }
-        }
-    }
-
-    // ================================================================
     //  ENTRADA DEL MOD
     // ================================================================
     public class JobSuitabilityTrackerMod : KMod.UserMod2
@@ -85,12 +45,10 @@ namespace JobSuitabilityTracker
         public override void OnLoad(Harmony harmony)
         {
             base.OnLoad(harmony);
-            Debug.Log("[JST] Job Suitability Tracker v1.36 cargado.");
+            Debug.Log("[JST] Job Suitability Tracker v1.49 cargado.");
             TryPatchShowProgress(harmony);
-            TryPatchChoreEnd(harmony);
         }
 
-        // ── Panel de logros ───────────────────────────────────────────
         private static void TryPatchShowProgress(Harmony harmony)
         {
             try
@@ -111,36 +69,6 @@ namespace JobSuitabilityTracker
             }
             catch (Exception e) { Debug.LogWarning($"[JST] Error ShowProgress: {e.Message}"); }
         }
-
-        // ── Finalización de tareas (dos hooks complementarios) ────────
-        // SetChore(Context): cubre la transición A→B (chore A completado,
-        //   driver.context aún tiene chore A con isComplete=True).
-        // StopChore(): cubre paradas explícitas sin sustitución inmediata.
-        private static void TryPatchChoreEnd(Harmony harmony)
-        {
-            try
-            {
-                var driverType = AccessTools.TypeByName("ChoreDriver");
-                if (driverType == null) { Debug.LogWarning("[JST] ChoreDriver no encontrado."); return; }
-
-                var setChore = AccessTools.Method(driverType, "SetChore");
-                if (setChore != null)
-                {
-                    harmony.Patch(setChore, prefix: new HarmonyMethod(
-                        typeof(ChoreEndPrefix), nameof(ChoreEndPrefix.Prefix)));
-                    Debug.Log("[JST] Parche → ChoreDriver.SetChore");
-                }
-
-                var stopChore = AccessTools.Method(driverType, "StopChore");
-                if (stopChore != null)
-                {
-                    harmony.Patch(stopChore, prefix: new HarmonyMethod(
-                        typeof(ChoreEndPrefix), nameof(ChoreEndPrefix.Prefix)));
-                    Debug.Log("[JST] Parche → ChoreDriver.StopChore");
-                }
-            }
-            catch (Exception e) { Debug.LogWarning($"[JST] Error ChoreDriver: {e.Message}"); }
-        }
     }
 
     // ================================================================
@@ -148,55 +76,41 @@ namespace JobSuitabilityTracker
     // ================================================================
     internal static class ReflectionHelper
     {
-        private const BindingFlags ALL =
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        private const BindingFlags DECLARED =
+            BindingFlags.Public | BindingFlags.NonPublic |
+            BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
+        // Traversa la jerarquía de herencia para encontrar propiedades y
+        // campos privados en clases padre (DeclaredOnly requerido para
+        // que Type.GetField encuentre privados de clases base).
         public static object GetMemberValue(object obj, string name)
         {
             if (obj == null) return null;
             var t = obj.GetType();
-            return t.GetProperty(name, ALL)?.GetValue(obj)
-                ?? t.GetField(name, ALL)?.GetValue(obj);
+            while (t != null && t != typeof(object))
+            {
+                var prop = t.GetProperty(name, DECLARED);
+                if (prop != null) try { return prop.GetValue(obj); } catch { }
+
+                var field = t.GetField(name, DECLARED);
+                if (field != null) try { return field.GetValue(obj); } catch { }
+
+                t = t.BaseType;
+            }
+            return null;
         }
 
         public static object Invoke(object obj, string method, params object[] args)
         {
             if (obj == null) return null;
-            var m = obj.GetType().GetMethod(method, ALL);
-            return m?.Invoke(obj, args);
-        }
-    }
-
-    // ================================================================
-    //  PREFIX COMPARTIDO — ChoreDriver.SetChore / StopChore
-    //  Lee el contexto ANTERIOR del driver antes de que se sobreescriba.
-    //  Si context.chore.isComplete==true y el dupe lleva traje → registra.
-    // ================================================================
-    public static class ChoreEndPrefix
-    {
-        private static readonly Tag TagSuit = TagManager.Create("HasAirtightSuit");
-
-        public static void Prefix(object __instance)
-        {
-            if (__instance == null) return;
-            try
+            var t = obj.GetType();
+            while (t != null && t != typeof(object))
             {
-                var ctx   = ReflectionHelper.GetMemberValue(__instance, "context");
-                var chore = ctx != null ? ReflectionHelper.GetMemberValue(ctx, "chore") : null;
-                if (chore == null) return;
-
-                var ic = ReflectionHelper.GetMemberValue(chore, "isComplete");
-                if (!(ic is bool b && b)) return;
-
-                var driverComp = __instance as Component;
-                if (driverComp == null) return;
-                var kpid = driverComp.GetComponent<KPrefabID>();
-                if (kpid == null) return;
-                if (!kpid.HasTag(TagSuit)) return;
-
-                SuitChoreTracker.Record(kpid.InstanceID);
+                var m = t.GetMethod(method, DECLARED);
+                if (m != null) try { return m.Invoke(obj, args); } catch { }
+                t = t.BaseType;
             }
-            catch { }
+            return null;
         }
     }
 
@@ -213,7 +127,7 @@ namespace JobSuitabilityTracker
                 if (!IsTargetAchievement(achievement)) return;
                 var widget = __instance as MonoBehaviour;
                 if (widget == null) return;
-                InjectOrRefresh(widget.gameObject, achievement);
+                InjectOrRefresh(widget.gameObject);
             }
             catch (Exception e) { Debug.LogWarning($"[JST] Postfix: {e.Message}"); }
         }
@@ -228,6 +142,7 @@ namespace JobSuitabilityTracker
                       ?? ReflectionHelper.GetMemberValue(mAch, "id") as string;
                 if (id != null) return id == Config.AchievementID;
             }
+            // Fallback: escanear todos los campos no-primitivos buscando el Id
             foreach (var f in status.GetType().GetFields(
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             {
@@ -241,50 +156,75 @@ namespace JobSuitabilityTracker
             return false;
         }
 
-        // ── Recuento oficial del juego para el ciclo actual ───────────
-        private static int GetGameCount(object status)
+        // ── Lee dupesCompleteChoresInSuits directamente del juego ────
+        // SaveGame.Instance.ColonyAchievementTracker.dupesCompleteChoresInSuits
+        // es Dictionary<int, List<int>> (ciclo → lista de InstanceIDs de dupes).
+        // Es la misma fuente que usa DupesCompleteChoreInExoSuitForCycles
+        // para su GetNumberOfDupesForCycle, garantizando paridad exacta.
+        private static HashSet<int> GetSuitedDupeIdsForCurrentCycle()
         {
-            var mAch = ReflectionHelper.GetMemberValue(status, "m_achievement");
-            if (mAch == null) return -1;
-
-            var reqs = ReflectionHelper.GetMemberValue(mAch, "Requirements") as IEnumerable
-                    ?? ReflectionHelper.GetMemberValue(mAch, "requirements") as IEnumerable;
-            if (reqs == null) return -1;
-
-            int currentCycle = 0;
-            if (GameClock.Instance != null)
-                try { currentCycle = (int)ReflectionHelper.Invoke(GameClock.Instance, "GetCycle"); } catch { }
-
-            foreach (var req in reqs)
+            var result = new HashSet<int>();
+            try
             {
-                if (req == null) continue;
-                var m = req.GetType().GetMethod("GetNumberOfDupesForCycle",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (m == null) continue;
-                try { return Convert.ToInt32(m.Invoke(req, new object[] { currentCycle })); }
-                catch { }
+                if (GameClock.Instance == null) return result;
+                int cycle = 0;
+                try { cycle = (int)ReflectionHelper.Invoke(GameClock.Instance, "GetCycle"); } catch { }
+
+                // 1. Obtener SaveGame.Instance
+                var saveGameType = AccessTools.TypeByName("SaveGame");
+                if (saveGameType == null) return result;
+
+                object saveGame = null;
+                foreach (var memberName in new[] { "Instance", "instance" })
+                {
+                    saveGame =
+                        saveGameType.GetProperty(memberName,
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                            ?.GetValue(null)
+                        ?? saveGameType.GetField(memberName,
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                            ?.GetValue(null);
+                    if (saveGame != null) break;
+                }
+                if (saveGame == null) return result;
+
+                // 2. Obtener ColonyAchievementTracker (propiedad de SaveGame que
+                //    devuelve GetComponent<ColonyAchievementTracker>())
+                var tracker = ReflectionHelper.GetMemberValue(saveGame, "ColonyAchievementTracker");
+                if (tracker == null) return result;
+
+                // 3. Leer el campo público dupesCompleteChoresInSuits
+                var field = tracker.GetType().GetField("dupesCompleteChoresInSuits",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (field == null) return result;
+
+                var dict = field.GetValue(tracker) as IDictionary;
+                if (dict == null || !dict.Contains(cycle)) return result;
+
+                // 4. Extraer los InstanceIDs del ciclo actual
+                var list = dict[cycle] as IEnumerable;
+                if (list == null) return result;
+
+                foreach (var item in list)
+                    if (item is int id) result.Add(id);
             }
-            return -1;
+            catch (Exception e) { Debug.LogWarning($"[JST] GetSuitedDupeIds: {e.Message}"); }
+            return result;
         }
 
         // ── Estado por duplicante ─────────────────────────────────────
-        // done = rastreado por SuitChoreTracker  OR  lleva HasAirtightSuit
-        // El tracker captura completaciones en tiempo real desde que se cargó
-        // el mod. HasAirtightSuit cubre dupes que completaron antes del arranque
-        // y aún llevan el traje puesto.
-        private static readonly Tag TagSuit = TagManager.Create("HasAirtightSuit");
-
         private static List<(string Name, bool Done)> GetDuplicantStatus()
         {
-            var result = new List<(string, bool)>();
+            var result    = new List<(string, bool)>();
+            var suitedIds = GetSuitedDupeIdsForCurrentCycle();
+
             foreach (var minion in Components.MinionIdentities.Items)
             {
                 if (minion == null) continue;
                 var kpid = minion.GetComponent<KPrefabID>();
                 if (kpid == null) continue;
 
-                bool done = SuitChoreTracker.HasDone(kpid.InstanceID)
-                         || kpid.HasTag(TagSuit);
+                bool done = suitedIds.Contains(kpid.InstanceID);
                 result.Add((minion.GetProperName(), done));
             }
 
@@ -296,7 +236,7 @@ namespace JobSuitabilityTracker
         }
 
         // ── Inyección / refresco del panel ───────────────────────────
-        private static void InjectOrRefresh(GameObject root, object status)
+        private static void InjectOrRefresh(GameObject root)
         {
             const string PANEL = "JST_Panel";
 
@@ -311,11 +251,7 @@ namespace JobSuitabilityTracker
             var list      = GetDuplicantStatus();
             int doneCount = list.Count(x => x.Done);
             int total     = Components.MinionIdentities.Items.Count;
-            int gameCount = GetGameCount(status);
-
-            string header = gameCount >= 0 && gameCount != doneCount
-                ? $"Completado con traje ({doneCount}/{total}) [juego:{gameCount}]:"
-                : $"Completado con traje ({doneCount}/{total}):";
+            string header = $"Completado con traje ({doneCount}/{total}):";
 
             if (existing != null)
             {
@@ -324,6 +260,7 @@ namespace JobSuitabilityTracker
                 return;
             }
 
+            // Primera vez: crear el panel bajo el contenedor adecuado
             Transform content = root.transform;
             foreach (var n in new[] { "Requirements", "Content", "Body",
                                       "ScrollContent", "Inner", "Container", "Details" })
@@ -341,7 +278,7 @@ namespace JobSuitabilityTracker
             vlg.childControlHeight    = false;
             vlg.childControlWidth     = true;
             vlg.childForceExpandWidth = true;
-            vlg.padding = new RectOffset(4, 0, 4, 0);
+            vlg.padding               = new RectOffset(4, 0, 4, 0);
 
             panel.AddComponent<ContentSizeFitter>().verticalFit =
                 ContentSizeFitter.FitMode.PreferredSize;
@@ -374,17 +311,15 @@ namespace JobSuitabilityTracker
 
             foreach (var (name, done) in list)
             {
-                var color = done
+                var    color = done
                     ? new Color(0.30f, 0.88f, 0.30f)
                     : new Color(0.90f, 0.40f, 0.40f);
-                string mark = done ? "☑" : "☐";
+                string mark  = done ? "☑" : "☐";
                 AddRow(panel.transform, $"JST_{name}",
                        $"  {mark}  {name}", color, 10.5f);
             }
         }
 
-        // Usamos TextMeshProUGUI en lugar de LocText para evitar que
-        // LocText.Awake() llame a StringKey..ctor en contexto no inicializado.
         private static void AddRow(Transform parent, string goName,
                                     string text, Color color, float size)
         {
