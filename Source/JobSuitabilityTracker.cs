@@ -1,21 +1,22 @@
 // ============================================================
 //  Job Suitability Tracker — Mod para Oxygen Not Included
 //  Compatible con juego base (VANILLA_ID) y Space Out (EXPANSION1_ID)
-//  Versión 1.49
+//  Versión 1.62
 //
 //  QUÉ HACE:
-//    Añade debajo de los contadores del logro "Idoneidad Laboral"
-//    (ExosuitCycles) una lista de todos los duplicantes con ☑ o ☐
-//    indicando si completaron alguna tarea con traje en el ciclo actual.
+//    Añade en el modo expandido del logro "Idoneidad Laboral" (ExosuitCycles)
+//    una lista de todos los duplicantes con ■ o □ indicando si completaron
+//    alguna tarea con traje en el ciclo actual.
 //
 //  CÓMO RASTREA:
-//    Lee directamente el campo dupesCompleteChoresInSuits de
-//    ColonyAchievementTracker — la misma fuente que usa el juego para
-//    su contador oficial. Esto garantiza paridad exacta sin necesidad
-//    de interceptar chores, workers ni eventos de finalización.
+//    Lee directamente dupesCompleteChoresInSuits de ColonyAchievementTracker.
 //
-//  PANEL:
-//    AchievementWidget.ShowProgress(ColonyAchievementStatus achievement)
+//  PARCHES:
+//    1. AchievementWidget.ShowProgress  → registra el progressParent del
+//       widget ExosuitCycles y crea el panel si ya está expandido.
+//    2. AchievementWidget.ExpandAchievement → inyecta/refresca el panel
+//       cuando el usuario despliega el widget (ShowProgress no se vuelve
+//       a llamar al expandir, sólo ExpandAchievement).
 // ============================================================
 
 using HarmonyLib;
@@ -45,8 +46,9 @@ namespace JobSuitabilityTracker
         public override void OnLoad(Harmony harmony)
         {
             base.OnLoad(harmony);
-            Debug.Log("[JST] Job Suitability Tracker v1.49 cargado.");
+            Debug.Log("[JST] Job Suitability Tracker v1.62 cargado.");
             TryPatchShowProgress(harmony);
+            TryPatchExpandAchievement(harmony);
         }
 
         private static void TryPatchShowProgress(Harmony harmony)
@@ -64,10 +66,28 @@ namespace JobSuitabilityTracker
                 if (target == null) { Debug.LogWarning("[JST] ShowProgress no encontrado."); return; }
 
                 harmony.Patch(target, postfix: new HarmonyMethod(
-                    typeof(ShowProgressPostfix), nameof(ShowProgressPostfix.Postfix)));
+                    typeof(AchievementPatches), nameof(AchievementPatches.ShowProgressPostfix)));
                 Debug.Log("[JST] Parche → AchievementWidget.ShowProgress");
             }
             catch (Exception e) { Debug.LogWarning($"[JST] Error ShowProgress: {e.Message}"); }
+        }
+
+        // ExpandAchievement es private — AccessTools la encuentra igualmente.
+        private static void TryPatchExpandAchievement(Harmony harmony)
+        {
+            try
+            {
+                var widgetType = AccessTools.TypeByName("AchievementWidget");
+                if (widgetType == null) return;
+
+                var target = AccessTools.Method(widgetType, "ExpandAchievement");
+                if (target == null) { Debug.LogWarning("[JST] ExpandAchievement no encontrado."); return; }
+
+                harmony.Patch(target, postfix: new HarmonyMethod(
+                    typeof(AchievementPatches), nameof(AchievementPatches.ExpandAchievementPostfix)));
+                Debug.Log("[JST] Parche → AchievementWidget.ExpandAchievement");
+            }
+            catch (Exception e) { Debug.LogWarning($"[JST] Error ExpandAchievement: {e.Message}"); }
         }
     }
 
@@ -80,9 +100,6 @@ namespace JobSuitabilityTracker
             BindingFlags.Public | BindingFlags.NonPublic |
             BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
-        // Traversa la jerarquía de herencia para encontrar propiedades y
-        // campos privados en clases padre (DeclaredOnly requerido para
-        // que Type.GetField encuentre privados de clases base).
         public static object GetMemberValue(object obj, string name)
         {
             if (obj == null) return null;
@@ -115,21 +132,64 @@ namespace JobSuitabilityTracker
     }
 
     // ================================================================
-    //  POSTFIX — AchievementWidget.ShowProgress
+    //  POSTFIXES — ShowProgress y ExpandAchievement
     // ================================================================
-    public static class ShowProgressPostfix
+    public static class AchievementPatches
     {
-        public static void Postfix(object __instance, object achievement)
+        // progressParents de widgets identificados como ExosuitCycles.
+        // Se rellena en ShowProgressPostfix y se consulta en
+        // ExpandAchievementPostfix (que no recibe el achievement).
+        private static readonly HashSet<RectTransform> _exosuitParents =
+            new HashSet<RectTransform>();
+
+        // ── ShowProgress postfix ──────────────────────────────────────
+        // Llamado cuando el juego puebla el widget (al mostrar la pantalla
+        // de logros). progressParent suele estar inactivo (colapsado).
+        public static void ShowProgressPostfix(object __instance, object achievement)
         {
             if (__instance == null || achievement == null) return;
             try
             {
                 if (!IsTargetAchievement(achievement)) return;
-                var widget = __instance as MonoBehaviour;
-                if (widget == null) return;
-                InjectOrRefresh(widget.gameObject);
+
+                var progressParent =
+                    ReflectionHelper.GetMemberValue(__instance, "progressParent") as RectTransform;
+                if (progressParent == null) return;
+
+                // Registrar este progressParent como ExosuitCycles
+                _exosuitParents.Add(progressParent);
+
+                // Si ya está expandido al cargar, inyectar ahora
+                if (progressParent.gameObject.activeSelf)
+                    InjectOrRefresh(progressParent);
             }
-            catch (Exception e) { Debug.LogWarning($"[JST] Postfix: {e.Message}"); }
+            catch (Exception e) { Debug.LogWarning($"[JST] ShowProgress: {e.Message}"); }
+        }
+
+        // ── ExpandAchievement postfix ─────────────────────────────────
+        // Llamado DESPUÉS de que el juego haya hecho SetActive(toggle).
+        // Si el resultado es active=true → el usuario acaba de expandir.
+        public static void ExpandAchievementPostfix(object __instance)
+        {
+            try
+            {
+                var progressParent =
+                    ReflectionHelper.GetMemberValue(__instance, "progressParent") as RectTransform;
+                if (progressParent == null) return;
+
+                // Sólo actuar en widgets ExosuitCycles registrados
+                if (!_exosuitParents.Contains(progressParent)) return;
+
+                if (progressParent.gameObject.activeSelf)
+                    InjectOrRefresh(progressParent);   // expandido → mostrar
+                else
+                {
+                    // Contraído → ocultar panel si existe
+                    var existing = progressParent.Find("JST_Panel");
+                    if (existing != null) existing.gameObject.SetActive(false);
+                }
+            }
+            catch (Exception e) { Debug.LogWarning($"[JST] ExpandAchievement: {e.Message}"); }
         }
 
         // ── ¿Es el logro ExosuitCycles? ──────────────────────────────
@@ -142,7 +202,6 @@ namespace JobSuitabilityTracker
                       ?? ReflectionHelper.GetMemberValue(mAch, "id") as string;
                 if (id != null) return id == Config.AchievementID;
             }
-            // Fallback: escanear todos los campos no-primitivos buscando el Id
             foreach (var f in status.GetType().GetFields(
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             {
@@ -156,11 +215,7 @@ namespace JobSuitabilityTracker
             return false;
         }
 
-        // ── Lee dupesCompleteChoresInSuits directamente del juego ────
-        // SaveGame.Instance.ColonyAchievementTracker.dupesCompleteChoresInSuits
-        // es Dictionary<int, List<int>> (ciclo → lista de InstanceIDs de dupes).
-        // Es la misma fuente que usa DupesCompleteChoreInExoSuitForCycles
-        // para su GetNumberOfDupesForCycle, garantizando paridad exacta.
+        // ── Lee dupesCompleteChoresInSuits del juego ──────────────────
         private static HashSet<int> GetSuitedDupeIdsForCurrentCycle()
         {
             var result = new HashSet<int>();
@@ -170,7 +225,6 @@ namespace JobSuitabilityTracker
                 int cycle = 0;
                 try { cycle = (int)ReflectionHelper.Invoke(GameClock.Instance, "GetCycle"); } catch { }
 
-                // 1. Obtener SaveGame.Instance
                 var saveGameType = AccessTools.TypeByName("SaveGame");
                 if (saveGameType == null) return result;
 
@@ -188,12 +242,9 @@ namespace JobSuitabilityTracker
                 }
                 if (saveGame == null) return result;
 
-                // 2. Obtener ColonyAchievementTracker (propiedad de SaveGame que
-                //    devuelve GetComponent<ColonyAchievementTracker>())
                 var tracker = ReflectionHelper.GetMemberValue(saveGame, "ColonyAchievementTracker");
                 if (tracker == null) return result;
 
-                // 3. Leer el campo público dupesCompleteChoresInSuits
                 var field = tracker.GetType().GetField("dupesCompleteChoresInSuits",
                     BindingFlags.Public | BindingFlags.Instance);
                 if (field == null) return result;
@@ -201,7 +252,6 @@ namespace JobSuitabilityTracker
                 var dict = field.GetValue(tracker) as IDictionary;
                 if (dict == null || !dict.Contains(cycle)) return result;
 
-                // 4. Extraer los InstanceIDs del ciclo actual
                 var list = dict[cycle] as IEnumerable;
                 if (list == null) return result;
 
@@ -236,17 +286,19 @@ namespace JobSuitabilityTracker
         }
 
         // ── Inyección / refresco del panel ───────────────────────────
-        private static void InjectOrRefresh(GameObject root)
+        private static void InjectOrRefresh(RectTransform progressParent)
         {
             const string PANEL = "JST_Panel";
 
-            Transform existing = root.transform.Find(PANEL);
-            if (existing == null)
-                foreach (Transform child in root.transform)
-                {
-                    existing = child.Find(PANEL);
-                    if (existing != null) break;
-                }
+            Transform existing = progressParent.Find(PANEL);
+
+            // Guard: si el panel existe pero no tiene VLG (creación fallida anterior),
+            // lo eliminamos para recrearlo limpiamente.
+            if (existing != null && existing.GetComponent<VerticalLayoutGroup>() == null)
+            {
+                UnityEngine.Object.Destroy(existing.gameObject);
+                existing = null;
+            }
 
             var list      = GetDuplicantStatus();
             int doneCount = list.Count(x => x.Done);
@@ -255,38 +307,106 @@ namespace JobSuitabilityTracker
 
             if (existing != null)
             {
+                existing.gameObject.SetActive(true);
                 UpdateHeader(existing.gameObject, header);
                 RefreshRows(existing.gameObject, list);
                 return;
             }
 
-            // Primera vez: crear el panel bajo el contenedor adecuado
-            Transform content = root.transform;
-            foreach (var n in new[] { "Requirements", "Content", "Body",
-                                      "ScrollContent", "Inner", "Container", "Details" })
-            {
-                var t = root.transform.Find(n);
-                if (t != null) { content = t; break; }
-            }
+            // Primera vez: forzar rebuild para que los world corners sean válidos
+            // (puede llamarse justo después de SetActive(true) en ExpandAchievement)
+            LayoutRebuilder.ForceRebuildLayoutImmediate(progressParent);
+
+            int leftMargin = MeasureDescLeftMargin(progressParent);
+            Debug.Log($"[JST] Panel creado → leftMargin={leftMargin}");
 
             var panel = new GameObject(PANEL);
-            panel.transform.SetParent(content, false);
+            panel.transform.SetParent(progressParent, false);
+
+            // El VLG de progressParent usa el patrón ancla-fija (0,1)→(0,1)
+            // y controla el ancho a través de sizeDelta.x, NO a través de stretch-anchor.
+            // Copiamos ese patrón exactamente: ancla en top-left y sizeDelta.x = ancho
+            // del contenedor (ya conocido tras ForceRebuildLayoutImmediate).
+            var panelRt = panel.AddComponent<RectTransform>();
+            float containerWidth = progressParent.rect.width;
+            panelRt.anchorMin = new Vector2(0f, 1f);
+            panelRt.anchorMax = new Vector2(0f, 1f);
+            panelRt.pivot     = new Vector2(0f, 1f);
+            panelRt.sizeDelta = new Vector2(containerWidth, 0f); // altura la fija ContentSizeFitter
+            Debug.Log($"[JST] panelRt: top-left anchor, sizeDelta.x={containerWidth}");
+
+            // flexibleWidth=1 para que el VLG padre lo expanda si sobra espacio
+            var panelLe = panel.AddComponent<LayoutElement>();
+            panelLe.flexibleWidth = 1f;
 
             var vlg = panel.AddComponent<VerticalLayoutGroup>();
-            vlg.spacing               = 2f;
-            vlg.childAlignment        = TextAnchor.UpperLeft;
-            vlg.childControlHeight    = false;
-            vlg.childControlWidth     = true;
-            vlg.childForceExpandWidth = true;
-            vlg.padding               = new RectOffset(4, 0, 4, 0);
+            vlg.spacing                = 0f;
+            vlg.childAlignment         = TextAnchor.UpperLeft;
+            vlg.childControlHeight     = true;
+            vlg.childControlWidth      = true;
+            vlg.childForceExpandWidth  = true;
+            vlg.childForceExpandHeight = false;
+            vlg.padding                = new RectOffset(leftMargin, 0, 2, 0);
 
             panel.AddComponent<ContentSizeFitter>().verticalFit =
                 ContentSizeFitter.FitMode.PreferredSize;
 
             AddRow(panel.transform, "JST_Header", header,
-                   new Color(0.75f, 0.75f, 0.75f), 11f);
+                   new Color(0.75f, 0.75f, 0.75f), 10.5f);
 
             RefreshRows(panel, list);
+
+            // Segundo rebuild: hace que el VLG padre posicione y dimensione
+            // correctamente el panel recién añadido.
+            LayoutRebuilder.ForceRebuildLayoutImmediate(progressParent);
+        }
+
+        // Mide el offset del texto de la primera fila de requisito
+        // en el espacio local del HIJO (RequirementPrefab), NO de progressParent.
+        //
+        // Razón: progressParent tiene un VLG con padding.left=P que desplaza
+        // a todos sus hijos P píxeles a la derecha. Si midiéramos desde
+        // progressParent obtendríamos P+T (P=padding VLG, T=offset texto en fila),
+        // y al aplicarlo como padding.left de nuestro panel (que el VLG ya desplaza P)
+        // el texto quedaría en P+(P+T)=2P+T en lugar de P+T. Midiendo dentro del
+        // hijo obtenemos T directamente, que es el padding correcto.
+        private static int MeasureDescLeftMargin(RectTransform progressParent)
+        {
+            const int FALLBACK = 22;
+            try
+            {
+                foreach (Transform child in progressParent)
+                {
+                    if (child.name.StartsWith("JST")) continue;
+
+                    var childRt = child as RectTransform ?? child.GetComponent<RectTransform>();
+                    if (childRt == null) continue;
+
+                    Component textComp =
+                        (Component)child.GetComponentInChildren<TMPro.TextMeshProUGUI>(true)
+                        ?? child.GetComponentInChildren<Text>(true);
+                    if (textComp == null) continue;
+
+                    var textRt = textComp.GetComponent<RectTransform>();
+                    if (textRt == null) continue;
+
+                    var corners = new Vector3[4];
+                    textRt.GetWorldCorners(corners);
+
+                    // Convertir la esquina superior-izquierda del texto al espacio
+                    // local del HIJO (RequirementPrefab), no de progressParent.
+                    Vector3 localInChild = childRt.InverseTransformPoint(corners[1]);
+                    float leftEdgeInChild = localInChild.x - childRt.rect.xMin;
+
+                    Debug.Log($"[JST] MeasureDesc: leftEdgeInChild={leftEdgeInChild:F1} "
+                            + $"(hijo='{child.name}', childRect.xMin={childRt.rect.xMin:F1})");
+
+                    if (leftEdgeInChild > 0f && leftEdgeInChild < 300f)
+                        return Mathf.RoundToInt(leftEdgeInChild);
+                }
+            }
+            catch (Exception e) { Debug.LogWarning($"[JST] MeasureDesc: {e.Message}"); }
+            return FALLBACK;
         }
 
         private static void UpdateHeader(GameObject panel, string text)
@@ -304,7 +424,7 @@ namespace JobSuitabilityTracker
 
             if (list.Count == 0)
             {
-                AddRow(panel.transform, "JST_Empty", "  (sin duplicantes)",
+                AddRow(panel.transform, "JST_Empty", "(sin duplicantes)",
                        Color.gray, 10.5f);
                 return;
             }
@@ -314,9 +434,9 @@ namespace JobSuitabilityTracker
                 var    color = done
                     ? new Color(0.30f, 0.88f, 0.30f)
                     : new Color(0.90f, 0.40f, 0.40f);
-                string mark  = done ? "☑" : "☐";
+                string mark  = done ? "■" : "□";
                 AddRow(panel.transform, $"JST_{name}",
-                       $"  {mark}  {name}", color, 10.5f);
+                       $"{mark} {name}", color, 10.5f);
             }
         }
 
@@ -327,7 +447,7 @@ namespace JobSuitabilityTracker
             go.transform.SetParent(parent, false);
 
             var le = go.AddComponent<LayoutElement>();
-            le.minHeight = le.preferredHeight = 16f;
+            le.minHeight = le.preferredHeight = size + 2f;
 
             var tmp = go.AddComponent<TMPro.TextMeshProUGUI>();
             tmp.text               = text;
